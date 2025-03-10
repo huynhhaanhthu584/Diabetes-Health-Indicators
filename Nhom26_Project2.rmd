@@ -1,0 +1,2006 @@
+---
+title: "Final Project - Nhóm 26 - Project 2"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Tải Thư Viện
+```{r}
+library(dplyr)  
+library(ggplot2)  
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(purrr)
+library(janitor)
+library(themis)
+library(e1071) 
+library(caret) 
+library(corrplot)  
+library(skimr)
+library(GGally)
+library(MASS)
+library(pROC)
+library(nnet)
+library(caret)
+library(glmnet)
+library(lmPerm)
+library(leaps)
+library(boot)
+library(mice)
+library(VIM)
+library(car)
+library(ipred)
+library(splines)
+```
+
+## Load Dữ Liệu
+
+```{r}
+data_path <- "diabetes_012_health_indicators_BRFSS2015.csv"
+
+data <- read_csv(data_path, show_col_types = FALSE)
+data <- data|> clean_names()
+
+glimpse(data)
+```
+
+#### Kiểm tra dữ liệu thiếu
+
+```{r}
+colSums(is.na(data[1:6]))
+colSums(is.na(data[7:9]))
+colSums(is.na(data[9:12]))
+colSums(is.na(data[13:17]))
+colSums(is.na(data[18:22]))
+```
+
+#### Kiểm tra biến và phân loại
+
+```{r}
+cat(names(data), sep = ", ")
+```
+
+```{r}
+binary_vars <- names(data)[sapply(data, function(x) length(unique(x)) == 2)]
+
+categorical_vars <- names(data)[sapply(data, function(x) length(unique(x)) > 2 & length(unique(x)) < 20)]
+
+continuous_vars <- names(data)[sapply(data, function(x) is.numeric(x) & length(unique(x)) > 20)]
+
+cat("Biến nhị phân:", paste(binary_vars, collapse  = ", "), "\n\n")
+cat("Biến phân loại:", paste(categorical_vars, collapse  = ", "), "\n\n")
+cat("Biến liên tục:", paste(continuous_vars, collapse  = ", "), "\n\n")
+```
+
+```{r}
+categorical_vars <- setdiff(categorical_vars, "diabetes_012")
+target_var <- "diabetes_012"
+```
+
+```{r}
+data <- data |> mutate(across(all_of(c(binary_vars, categorical_vars, target_var)), as.factor))
+
+glimpse(data)
+```
+
+#### Trực quan hóa phân bố dữ liệu
+
+##### Biến định tính (nhị phân và phân loại)
+
+```{r}
+summary(data[target_var])
+cat("\n")
+summary(data[binary_vars[1:6]])
+cat("\n")
+summary(data[binary_vars[7:11]])
+cat("\n")
+summary(data[binary_vars[11:14]])
+cat("\n")
+summary(data[categorical_vars])
+
+c(target_var, binary_vars, categorical_vars)|>
+  walk(function(col_name) {
+    if (col_name %in% colnames(data)) {
+      print(
+        ggplot(data, aes_string(x = col_name)) +
+          geom_bar(fill = "orange", color = "black", alpha = 0.7) +
+          labs(title = paste("Phân bố biến:", col_name), x = col_name, y = "Tần số") +
+          theme_minimal()
+      )
+    }
+  })
+```
+
+##### Biến định lượng (liên tục)
+
+```{r}
+summary(data[continuous_vars])
+
+continuous_vars |>
+  walk(function(col_name) {
+    if (col_name %in% colnames(data)) {
+      print(
+        ggplot(data, aes_string(x = col_name)) +
+          geom_histogram(binwidth = 5, fill = "forestgreen", color = "black", alpha = 0.7) +
+          labs(title = paste("Phân bố biến số liên tục:", col_name), x = col_name, y = "Tần số") +
+          theme_minimal()
+      )
+    }
+  })
+```
+
+## A/B Testing
+
+1.  Hàm tính AB testing cho 2 nhóm bằng phương pháp permutation test theo trung bình và tỷ lệ
+
+```{r}
+permutation_test_mean <- function(x, y, R, alter){
+  output_list <- list()
+  df <- split(x, y)
+  nA <- length(df[[1]])
+  nB <- length(df[[2]])
+  n <- nA + nB
+  mean_diff <- numeric(R)
+  set.seed(45)
+  for (i in 1:R){
+    idx_A <- sample(x = 1:n, size = nA)
+    idx_B <- setdiff(x = 1:n, y = idx_A)
+    mean_diff[i] <- mean(x[idx_A]) - mean(x[idx_B])
+  }
+  output_list$res_perm <- mean_diff
+  meanA <- mean(df[[1]])
+  output_list$mean_A <- meanA
+  meanB <- mean(df[[2]])
+  output_list$mean_B <- meanB
+  if (alter == 'left'){ p_value <- mean(mean_diff < (meanA - meanB)) }
+  else if (alter == 'right'){ p_value <- mean(mean_diff > (meanA - meanB)) }
+  else{ p_value <- mean(abs(mean_diff) > abs(mean1 - mean2)) }
+  output_list$p_value <- p_value
+  return(output_list)
+}
+
+permutation_test_prop <- function(x, y, R, alter){
+  output_list <- list()
+  df <- split(x, y)
+  nA <- length(df[[1]])
+  nB <- length(df[[2]])
+  n <- nA + nB
+  prop_diff <- numeric(R)
+  set.seed(45)
+  for (i in 1:R){
+    idx_A <- sample(x = 1:n, size = nA, replace = TRUE)
+    idx_B <- setdiff(x = 1:n, y = idx_A)
+    prop_diff[i] <- mean(x[idx_A]==0) - mean(x[idx_B]==0)
+  }
+  output_list$res_perm <- prop_diff
+  propA <- mean(df[[1]]==0)
+  output_list$prop_A <- propA
+  propB <- mean(df[[2]]==0)
+  output_list$prop_B <- propB
+  if (alter == 'left'){ p_value <- mean(prop_diff < (propA - propB)) }
+  else if (alter == 'right'){ p_value <- mean(prop_diff > (propA - propB)) }
+  else{ p_value <- mean(abs(prop_diff) > abs(propA - propB)) }
+  output_list$p_value <- p_value
+  return(output_list)
+}
+```
+
+2.  Hàm chia nhỏ dữ liệu và tính p-value của mỗi batch
+
+```{r}
+permutation_chisq <- function(x, y, R, batch_size) { 
+  contingency_table <- table(x, y) 
+  chi_squared_obs <- chisq.test(contingency_table)$p.value 
+  chi_squared_permute <- numeric(R) 
+  num_batches <- ceiling(length(x) / batch_size)
+  p_value_permute <- numeric(num_batches)
+  for (j in 1:num_batches) {
+    df <- data.frame(x = x, y = y)
+    df <- sample(df)
+    start_idx <- (j - 1) * batch_size + 1
+    end_idx <- min(j * batch_size, length(x))
+    x_batch <- x[start_idx:end_idx]
+    y_batch <- sample(y[start_idx:end_idx])
+    contingency_table_batch <- table(x_batch, y_batch)
+    p_value_permute[j] <- chisq.test(contingency_table_batch)$p.value
+  }
+  list(Observed_Chi_Squared = chi_squared_obs, 
+       P_Value = p_value_permute)
+}
+```
+
+### 1. Vấn đề sức khỏe và tình trạng bệnh lý
+
+#### 1.1. Biến nhị phân
+
+**Mục tiêu :** Kiểm tra liệu tỷ lệ KHÔNG mắc bệnh tiểu đường có bị ảnh hưởng bởi hai nhóm người mắc và không mắc các vấn đề sức khỏe và tình trạng bệnh lý
+
+**Giả thuyết và Đối thuyết:**$$
+H_0 : p_0 = p_1
+$$
+
+$$
+H_1 : p_0 \neq p_1
+$$
+
+**Mức ý nghĩa :** $\alpha = 0.05$
+
+**Mô tả và kiểm chứng :**
+
+```{r}
+par(mfrow = c(2, 2))
+for (name in c('high_bp', 'high_chol', 'stroke', 'heart_diseaseor_attack', 'diff_walk')){
+  cat("\n", name)
+  print(table(data[[target_var]], data[[name]]))
+  res <- permutation_test_prop(data[[target_var]], data[[name]], 1000, "two-sided")
+  
+  hist(res$res_perm, col = "skyblue", xlab = paste("p_value =", res$p_value), ylab = "Frequency", main = name)
+}
+```
+
+**Kết luận :** Với mức ý nghĩa 0.05, bác bỏ được $H_0$ hay các bệnh lý như cao huyết áp, cao cholesterol, đột quỵ, đau tim, khó khăn về vận động đều ảnh hưởng đến tình trạng bệnh tiểu đường.
+
+**Nhận xét :** Người mắc các bệnh lý như trên có nguy cơ cao mắc bệnh tiểu đường hơn người khỏe mạnh.
+
+### 2. Liên quan đến chất lượng cuộc sống và sức khỏe tâm lý
+
+#### 2.1. Biến nhị phân
+
+**Mục tiêu :** Kiểm tra liệu tỷ lệ KHÔNG mắc bệnh tiểu đường có bị ảnh hưởng bởi hai nhóm người có lối sống khác nhau hay không.
+
+**Giả thuyết và Đối thuyết:**$$ H_0 : p_0 = p_1 $$
+
+$$ H_1 : p_0 \neq p_1 $$
+
+**Mức ý nghĩa :** $\alpha = 0.05$
+
+**Mô tả và kiểm chứng :**
+
+```{r}
+par(mfrow = c(2, 2))
+for (name in c('smoker', 'hvy_alcohol_consump', 'no_docbc_cost', 'chol_check', 'phys_activity', 'fruits', 'veggies', 'any_healthcare')){
+  cat("\n", name)
+  print(table(data[[target_var]], data[[name]]))
+  res <- permutation_test_prop(data[[target_var]], data[[name]], 1000, "two-sided")
+  
+  hist(res$res_perm, col = "skyblue", xlab = paste("p_value =", res$p_value), ylab = "Frequency", main = name)
+}
+```
+
+**Kết luận :** Với mức ý nghĩa 0.05, bác bỏ được $H_0$ hay các lối sống tiêu cực và lành mạnh đều ảnh hưởng đáng kể đến tình trạng bệnh tiểu đường
+
+**Nhận xét :** Người có các lối sống tiêu cực như hút thuốc, uống rượu nhiều, bị hạn chế được gặp y-bắc sĩ do hoàn cảnh, ít kiểm tra cholesterol hay kiểm tra sức khỏe, ít hoạt động thể chất, ít ăn rau củ trái cây và ít tiếp cận các dịch vụ chăm sóc sức khỏe có nguye cơ cao mắc bệnh tiểu đường.
+
+#### 2.2. Biến phân loại
+
+**Mục tiêu :** Kiểm tra liệu tình trạng tiểu đường có phụ thuộc vào điểm tự đánh giá sức khỏe hay không.
+
+**Giả thuyết :** diabetes_012 và gen_hlth độc lập.
+
+**Đối thuyết :** diabetes_012 và gen_hlth không độc lập.
+
+**Mức ý nghĩa :** $\alpha = 0.05$
+
+**Mô tả và kiểm chứng :**
+
+```{r}
+table(data[[target_var]], data$gen_hlth)
+
+ggplot(data, aes(x = gen_hlth , fill = .data[[target_var]])) +
+  geom_bar() +
+  labs(x = target_var, y = "Count", title = "Bar plot of Target Variable vs General Health") +
+theme_bw() 
+```
+
+```{r}
+permutation_chisq(data[[target_var]], data$gen_hlth, 1, 13000)
+```
+
+**Kết luận :** Với mức ý nghĩa 0.05, ta không bác bỏ được $H_0$ hay có thể tình trạng tiểu đường không phụ thuộc vào điểm tự đánh giá sức khỏe.
+
+**Nhận xét :** mọi người tự đánh giá sức khỏe của mình phụ thuộc vào nhiều yếu tố khác nữa chứ không chỉ là tình trạng bệnh tiểu đường.
+
+### 3. Vấn đề về nhân khẩu học
+
+#### 3.1. Biến nhị phân
+
+**Mục tiêu :** Kiểm tra liệu tỷ lệ KHÔNG mắc bệnh tiểu đường có bị ảnh hưởng bởi hai giới tính sinh học không.
+
+**Giả thuyết và Đối thuyết:**$$ H_0 : p_0 = p_1 $$
+
+$$ H_1 : p_0 \neq p_1 $$
+
+**Mức ý nghĩa :** $\alpha = 0.05$
+
+**Mô tả và kiểm chứng :**
+
+```{r}
+table(data[[target_var]], data$sex)
+res <- permutation_test_prop(data[[target_var]], data$sex, 1000, "two-sided")
+  
+hist(res$res_perm, col = "skyblue", xlab = paste("p_value = ", res$p_value), ylab = "Frequency", main = paste("Histogram of Permuted Differences for Sex"))
+```
+
+**Kết luận :** với mức ý nghĩa 0.05, bác bỏ được $H_0$ hay ta nói, giới tính có ảnh hưởng đến tình trạng bệnh tiểu đường.
+
+#### 3.2. Biến phân loại
+
+**Mục tiêu :** Kiểm tra liệu tỷ lệ mắc bệnh tiểu đường có bị phụ thuộc vào các nhóm tuổi, các nhóm trình độ giáo dục hay các nhóm có mức thu nhập khác nhau hay không.
+
+**Giả thuyết :** diabetes_012 độc lập với age, education, income.
+
+**Đối thuyết :** diabetes_012 không độc lập với age, education, income.
+
+**Mức ý nghĩa :** $\alpha = 0.05$
+
+**Mô tả và kiểm chứng :**
+
+```{r}
+par(mfrow = c(2, 2))
+for (name in c('age', 'education', 'income')){
+  cat("\n", name)
+  print(table(data[[target_var]], data[[name]]))
+}
+
+
+for (name in c('age', 'education', 'income')){
+  p <- ggplot(data, aes(x = .data[[name]], fill = .data[[target_var]])) +
+  geom_bar() +
+  labs(x = target_var, y = "Count", title = paste("Bar plot of Target Variable vs", name)) +
+theme_bw() 
+  print(p)
+}
+
+```
+
+```{r}
+permutation_chisq(data[[target_var]], data$age, 1, 13000)
+```
+
+**Kết luận :** với mức ý nghĩa 0.05, ta không thể bác bỏ $H_0$ hay có thể diabetes_012 độc lập với age
+
+**Nhận xét:** bệnh tiểu đường không bị phụ thuộc bởi các nhóm tuổi khác nhau
+
+```{r}
+permutation_chisq(data[[target_var]], data$education, 1, 13000)
+```
+
+**Kết luận :** với mức ý nghĩa 0.05, ta không thể bác bỏ $H_0$ hay có thể diabetes_012 độc lập với education.
+
+**Nhận xét:** trình độ học vấn khác nhau không gây ảnh hưởng đến tình trạng bệnh tiểu đường.
+
+```{r}
+permutation_chisq(data[[target_var]], data$income, 1, 13000)
+```
+
+**Kết luận :** với mức ý nghĩa 0.05, ta không thể bác bỏ $H_0$ hay có thể diabetes_012 độc lập với incom.
+
+**Nhận xét:** ở bất cứ mức thu nhập nào, mọi người đều có nguy cơ mắc bệnh tiểu đường như nhau.
+# A. Mở đầu
+
+Mục đích của bài toán lớn là dự đoán nguy cơ mắc bệnh tiểu đường của 1
+người, qua quan sát ta thấy BMI có ảnh hưởng cao đến bệnh tiểu đường. Do
+đó, biến BMI khá quan trọng trong việc dự đoán bệnh tiểu đường, nên ta
+sẽ đặc biệt chú ý đến biến này và xem xét các ảnh hưởng của các biến
+khác lên BMI như thế nào bằng mô hình hồi quy
+
+# B. Hồi quy
+
+
+## 1. Tải dữ liệu
+
+```{r}
+data <- read.csv("diabetes_012_health_indicators_BRFSS2015.csv")
+data <- data |> janitor::clean_names()
+data_no_diabetes <- data[, names(data) != "diabetes_012"]
+glimpse(data_no_diabetes)
+```
+
+## 2. Kiểm tra dữ liệu
+
+### 2.1 Kiểm tra dữ liệu khuyết
+
+```{r}
+missing_values <- colSums(is.na(data_no_diabetes))
+print("Số lượng giá trị khuyết ở mỗi cột:")
+print(missing_values)
+```
+
+Số lượng giá trị thiếu ở mỗi cột = 0 =\> Không cần xử lí dữ liệu khuyết
+
+### 2.2 Kiểm tra sự tương quan
+
+```{r}
+# Vẽ ma trận tương quan giữa các biến
+cor_matrix <- cor(data_no_diabetes)
+print("Ma trận tương quan của dữ liệu:")
+print(cor_matrix)
+```
+
+```{r}
+# Vẽ ma trận tương quan các biến với BMI
+# Tính ma trận tương quan chỉ với các biến số
+cor_matrix <- cor(data_no_diabetes[sapply(data_no_diabetes, is.numeric)])
+
+# Lấy giá trị tương quan với BMI
+cor_bmi <- cor_matrix["bmi", ]
+
+# Chuyển thành dataframe để vẽ
+cor_bmi_df <- data.frame(Variable = names(cor_bmi), Correlation = cor_bmi)
+
+ggplot(cor_bmi_df, aes(x = reorder(Variable, Correlation), y = Correlation, fill = Correlation)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +  # Xoay trục để các biến hiển thị dọc
+  scale_fill_gradient2(low = "blue", mid = "gray", high = "red", midpoint = 0) +
+  labs(title = "Correlation with BMI", x = "Variables", y = "Correlation") +
+  theme_minimal()
+
+```
+
+-   Nhận xét chung:
+    -   Gen_hlth có tương quan cao nhất với BMI và là yếu tố quan trọng
+        ảnh hưởng đến BMI =\> Điều này hợp lý vì sức khỏe tổng quát
+        thường phản ánh các yếu tố liên quan đến cân nặng và lối sống.
+
+    -   High_bp và Diff_walk: Hai yếu tố này có mối tương quan đáng kể
+        với BMI =\>cho thấy những người có BMI cao thường gặp các vấn đề
+        về huyết áp và khả năng di chuyển.
+
+    -   Phys_hlth và High_chol: Cũng có mối quan hệ đáng kể với BMI =\>
+        Điều này hợp lý vì BMI cao có thể dẫn đến các vấn đề sức khỏe
+        như cholesterol cao và sức khỏe thể chất suy giảm.
+
+    -   Nhóm yếu tố có tương quan thấp với BMI: Phys_activity,
+        Education, Income, và Fruits có tương quan rất thấp, gần như
+        không ảnh hưởng đáng kể đến BMI.
+
+    -   Các yếu tố tương quan âm với BMI:Phys_activity có tương quan âm
+        nhẹ, cho thấy người hoạt động thể chất nhiều có xu hướng BMI
+        thấp hơn.
+
+### 2.3 Kiểm tra đa cộng tuyến
+
+```{r}
+md_bmi <- lm(bmi ~ ., data = data_no_diabetes)
+vif(md_bmi)
+```
+
+Tất cả các biến đều có VIF \<5, không bị xuất hiện đa cộng tuyến trong
+mô hình
+
+### 2.4 Chuyển các biến phân loại sang factor
+
+```{r}
+categorical_columns <- c("high_bp", "high_chol", "chol_check", "smoker","stroke", 
+                         "heart_diseaseor_attack", "phys_activity", "fruits", 
+                         "veggies", "hvy_alcohol_consump", "any_healthcare", 
+                         "no_docbc_cost", "diff_walk", "sex", "gen_hlth","age", "education",                          "income")
+data_no_diabetes <- data_no_diabetes %>% mutate(across(all_of(categorical_columns), as.factor))
+str(data_no_diabetes)
+```
+
+## 3. Xây dựng mô hình ban đầu
+
+```{r}
+md_base_bmi <- lm(bmi ~ ., data = data_no_diabetes)
+summary(md_base_bmi)
+```
+
+-   Nhận xét mô hình ban đầu
+
+1.  Đánh giá tổng thể mô hình
+
+-   R\^2=0.1443: Chỉ 14.43% sự biến thiên của BMI được giải thích bởi
+    các biến độc lập trong mô hình.
+
+2.Biến có ý nghĩa thống kê (p \< 0.05): - Các biến như high_bp,
+high_chol, phys_activity, gen_hlth, diff_walk, và nhiều cấp độ của age
+và income đều có ý nghĩa thống kê cao(p\<0.001). =\> Đây là những biến
+quan trọng cần giữ lại trong mô hình.
+
+3.  Biến không có ý nghĩa thống kê (p \>= 0.05):
+
+-   Các biến như veggies1 (p=0.19984), education (p\>0.4), và một số cấp
+    độ của age (ví dụ: age11 với p=0.70762) không có ý nghĩa thống kê
+    nhưng có thể có tương tác với các biến còn lại lên mô hình =\> kiểm
+    tra thêm
+
+-   no_docbc_cost1 (p=0.18935): không có ý nghĩa thống kê, mặc khác
+    trong thực tế Không gặp rào cản chi phí khi thăm khám không ảnh
+    hưởng đáng kể đến BMI và có biến income sẽ khái quát hơn về mặt chi
+    phí nền ta sẽ loại biến no_docbc_cost ra khỏi mô hìnhx
+
+### 3.1 Bỏ biến no_docbc_cost ra khỏi mô hình và xem xét R\^2 của mô hình
+
+```{r}
+md_bmi_ <- lm(bmi ~ high_bp + high_chol + chol_check + smoker + stroke                        + heart_diseaseor_attack + phys_activity + fruits +                            veggies + hvy_alcohol_consump + any_healthcare + gen_hlth +
+                       ment_hlth + phys_hlth + diff_walk + age + sex + education                       + income, data = data_no_diabetes)
+summary(md_bmi)
+```
+
+
+Tiếp theo, nhóm em sẽ Xây dựng mô hình hồi quy với tất cả các tương tác
+bậc 2 để kiểm tra xem cặp biến tiềm năng nào có ý nghĩa thống kê (p_val
+\<0.05)
+
+```{r}
+md_bmi_interaction <- lm(bmi ~ (high_bp + high_chol + chol_check + smoker + 
+                           stroke + heart_diseaseor_attack + phys_activity
+                         + fruits + veggies + hvy_alcohol_consump +
+                           any_healthcare + gen_hlth +ment_hlth + phys_hlth 
+                         + diff_walk + age + sex + education + income)^2, 
+                         data = data_no_diabetes)
+summary(md_bmi_interaction)
+```
+
+Chúng ta sẽ chọn các biến tương tác có p_val \<0.05: high_bp:high_chol,
+high_bp:chol_check, high_bp:phys_activity, high_bp:hvy_alcohol_consump,
+high_bp:gen_hlth, high_bp:diff_walk, high_chol:smoker,
+high_chol:phys_hlth, smoker:fruits, smoker:veggies, smoker:gen_hlth,
+smoker:diff_walk, chol_check:gen_hlth, chol_check:age, stroke:gen_hlth,
+stroke:phys_hlth
+
+### 3.2 Kiểm tra các biến tương tác trong mô hình ban đầu
+
+Bây giờ chúng ta sẽ tiến hành kiểm tra các biến tương tác này có thật sự
+ảnh hưởng đến BMI không
+
+```{r}
+# Hàm kiểm tra tương tác
+evaluate_interaction <- function(interaction_term, data) {
+  # Tách các biến tương tác
+  interaction_vars <- strsplit(interaction_term, ":")[[1]]
+  
+  # Xử lý tên biến nếu là factor
+  interaction_vars <- sapply(interaction_vars, function(var) {
+    if (is.factor(data[[var]])) {
+      paste0(var, levels(data[[var]])[2])  
+    } else {
+      var
+    }
+  })
+  
+  # Ghép lại tên biến tương tác
+  interaction_term_formatted <- paste(interaction_vars, collapse = ":")
+  
+  # Xây dựng công thức
+  formula <- as.formula(paste("bmi ~", interaction_term, "+ high_bp + high_chol + chol_check + smoker + stroke + ",
+                              "heart_diseaseor_attack + phys_activity + fruits + veggies + ",
+                              "hvy_alcohol_consump + any_healthcare + gen_hlth + ment_hlth + ",
+                              "phys_hlth + diff_walk + age + sex + education + income"))
+  
+  # Chạy mô hình
+  model <- lm(formula, data = data)
+  summary_model <- summary(model)
+  
+  # Kiểm tra nếu biến tương tác tồn tại trong bảng coefficients
+  if (interaction_term_formatted %in% rownames(summary_model$coefficients)) {
+    p_value <- summary_model$coefficients[interaction_term_formatted, "Pr(>|t|)"]
+  } else {
+    p_value <- NA  # Gán NA nếu không tồn tại
+  }
+  
+  return(list(term = interaction_term, p_value = p_value))
+}
+
+# Danh sách các biến tương tác cần kiểm tra
+interaction_terms <- c(
+  "high_bp:high_chol", "high_bp:chol_check", "high_bp:phys_activity", "high_bp:hvy_alcohol_consump", 
+  "high_bp:gen_hlth", "high_bp:diff_walk", "high_chol:smoker", "high_chol:phys_hlth", 
+  "smoker:fruits", "smoker:veggies", "smoker:gen_hlth", "smoker:diff_walk", 
+  "chol_check:gen_hlth", "chol_check:age", "stroke:gen_hlth", "stroke:phys_hlth"
+)
+
+# Chạy kiểm tra từng biến tương tác
+results <- lapply(interaction_terms, evaluate_interaction, data = data_no_diabetes)
+
+# Chuyển kết quả thành dataframe để xem
+results_df <- do.call(rbind, lapply(results, as.data.frame))
+
+# In kết quả
+print(results_df)
+
+
+```
+
+-   Các tương tác sau đây có ý nghĩa thống kê:
+    -   high_bp:high_chol (p-value = 1.61e-50)
+    -   high_bp:chol_check (p-value = 1.95e-04)
+    -   high_bp:phys_activity (p-value = 1.59e-02)
+    -   high_bp:hvy_alcohol_consump (p-value = 2.26e-20)
+    -   high_bp:gen_hlth (p-value = 7.09e-11)
+    -   high_bp:diff_walk (p-value = 1.41e-04)
+    -   high_chol:smoker (p-value = 8.75e-04)
+    -   smoker:fruits (p-value = 5.83e-40)
+    -   smoker:veggies (p-value = 4.09e-45)
+    -   smoker:gen_hlth (p-value = 7.25e-216)
+    -   smoker:diff_walk (p-value = 5.49e-103)
+    -   chol_check:age (p-value = 1.30e-02)
+    -   stroke:gen_hlth (p-value = 1.21e-36)
+    -   stroke:phys_hlth (p-value = 5.87e-04):
+
+### 3.3 Xây dựng mô hình mới
+
+Ta sẽ đưa các biến tương tác vừa tìm được để xây dựng mô hình mới
+
+```{r}
+md_bmi_update <- lm(bmi ~ high_bp*high_chol + high_bp*phys_activity +           high_bp*hvy_alcohol_consump + high_bp*gen_hlth + high_bp*diff_walk + high_chol*smoker + smoker*fruits + smoker*veggies + smoker*gen_hlth + smoker*diff_walk + chol_check*age + stroke*gen_hlth + stroke*phys_hlth +        heart_diseaseor_attack + education + income + sex, 
+  data = data_no_diabetes
+)
+summary(md_bmi_update)
+```
+
+Mô hình mới có sự cải thiện R\^2 từ 13.97% lên 14.9%
+
+## 4. Lựa chọn mô hình
+
+```{r}
+# Sử dụng model.matrix để chuyển các biến factor sang dạng dummy
+data_no_diabetes_dummy <- model.matrix(
+  ~ high_bp * high_chol + high_bp * phys_activity + high_bp * hvy_alcohol_consump +
+    high_bp * gen_hlth + high_bp * diff_walk + high_chol * smoker +
+    smoker * fruits + smoker * veggies + smoker * gen_hlth +
+    smoker * diff_walk + chol_check * age + stroke * gen_hlth + stroke * phys_hlth +
+    heart_diseaseor_attack + education + income + sex - 1,  # -1 để loại bỏ intercept tự động
+  data = data_no_diabetes
+)
+
+# Chuyển đổi ma trận sang data frame
+data_no_diabetes_dummy <- as.data.frame(data_no_diabetes_dummy)
+data_no_diabetes_dummy$bmi <- data_no_diabetes$bmi  # Thêm biến phụ thuộc
+library(leaps)
+
+# Áp dụng regsubsets với dữ liệu đã chuyển đổi
+out_subset_bmi <- regsubsets(
+  bmi ~ ., 
+  data = data_no_diabetes_dummy, 
+  nvmax = 20,  # Số lượng biến tối đa
+  method = "seqrep"
+)
+
+# Tóm tắt kết quả
+summary_subset <- summary(out_subset_bmi)
+
+# Xem giá trị Mallows' Cp
+cp_values <- summary_subset$cp
+print("Mallows' Cp values:")
+print(cp_values)
+
+# Vẽ biểu đồ Mallows' Cp
+plot(
+  cp_values, 
+  type = "b", 
+  xlab = "Số biến trong mô hình", 
+  ylab = "Mallows Cp", 
+  main = "Mallows Cp cho các mô hình con"
+)
+abline(a = 0, b = 1, col = "red", lty = 2)  # Đường tham chiếu y = x
+# Tìm số biến tối ưu
+best_model_index <- which.min(cp_values)
+print(paste("Số biến trong mô hình tốt nhất:", best_model_index))
+
+# Lấy các biến trong mô hình tốt nhất
+best_model_variables <- coef(out_subset_bmi, best_model_index)
+print("Các biến trong mô hình tốt nhất:")
+print(best_model_variables)
+
+# Tạo công thức mô hình
+best_model_formula <- as.formula(
+  paste("bmi ~", paste(names(best_model_variables[-1]), collapse = " + "))
+)
+print("Công thức mô hình tốt nhất:")
+print(best_model_formula)
+# Xây dựng mô hình tốt nhất
+md_bmi_best <- lm(best_model_formula, data = data_no_diabetes_dummy)
+
+# Tóm tắt mô hình tốt nhất
+summary(md_bmi_best)
+
+```
+
+R\^2 giảm so với mô hình ban đầu cho thấy vẫn chưa cải thiện hiệu suất
+
+```{r}
+set.seed(123)
+
+# 10-fold cross-validation
+error10 <- errorest(best_model_formula, data = data_no_diabetes_dummy, model = lm)$error
+
+# 5-fold cross-validation
+error5 <- errorest(best_model_formula, data = data_no_diabetes_dummy, model = lm, est.para = control.errorest(k = 5))$error
+
+# 50-fold cross-validation
+error50 <- errorest(best_model_formula, data = data_no_diabetes_dummy, model = lm, est.para = control.errorest(k = 50))$error
+
+# Tổng hợp kết quả RMSE
+cv_errors <- data.frame(
+  k = c(5, 10, 50),
+  RMSE = c(error5, error10, error50)
+)
+print("Sai số RMSE từ Cross-Validation:")
+print(cv_errors)
+
+```
+
+=\> Chúng ta vẫn sẽ giữ mô hình ban đầu
+
+## 5. Chẩn đoán mô hình
+
+### 5.1 Kiểm tra tính tuyến tính của mô hình
+
+```{r}
+ggplot(data = md_bmi_update, mapping = aes(x = .fitted, y= .resid)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE) + # ve duong cong theo xu huong dl
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x= "Fitted values", y= "Residuals") +
+  theme_bw()
+```
+
+Nhận xét:
+
+-   Đường cong màu xanh cho thấy có sự dao động nhẹ xung quanh đường
+    ngang tại giá trị 0.
+
+<!-- -->
+
+-   Mặc dù phần lớn các phần dư nằm khá đồng đều xung quanh giá trị 0,
+    nhưng ở một số khu vực, đặc biệt ở phía đầu và cuối của giá trị
+    Fitted Values, có dấu hiệu của sự không tuyến tính nhẹ.
+
+### 5.2 Kiểm tra đồng nhất phương sai
+
+```{r echo=TRUE, results="asis"}
+ggplot(md_bmi_update, aes(x = .fitted, y = sqrt(abs(.stdresid)))) +
+  geom_point(na.rm = TRUE) +
+  geom_smooth(method = "loess", na.rm = TRUE, se = FALSE) +
+  labs(x = "Fitted Values", y = expression(sqrt("|Standardized residuals|"))) +
+  theme_bw()
+```
+
+Nhận xét: Đồng nhất phương sai: Không có dấu hiệu rõ ràng của vi phạm
+đồng nhất phương sai trong mô hình. Phương sai phần dư dường như không
+thay đổi lớn theo giá trị dự đoán (.fitted).
+
+### 5.3 Kiểm tra phân phối của phần dư
+
+```{r}
+# Phần dư từ mô hình
+residuals <- resid(md_bmi_update)
+
+# Histogram của phần dư
+hist(residuals, breaks = 30, main = "Histogram of Residuals",
+     xlab = "Residuals", col = "lightblue", border = "black")
+# Q-Q Plot
+qqnorm(residuals, main = "Q-Q Plot of Residuals")
+qqline(residuals, col = "red", lwd = 2)
+
+
+```
+
+-   Phần giữa của dữ liệu (gần trục 0 trên trục x):
+    -   Các điểm nằm khá sát đường thẳng màu đỏ (đường chuẩn lý thuyết)
+
+        =\> Điều này cho thấy phần dư gần trung tâm tuân theo phân phối
+        chuẩn.
+-   Phần đuôi (ở hai đầu của biểu đồ):
+    -   Ở đuôi bên trái (giá trị rất nhỏ) và đuôi bên phải (giá trị rất
+        lớn), các điểm lệch khỏi đường thẳng chuẩn một cách rõ rệt.
+
+        =\> Đây là dấu hiệu của phân phối không chuẩn ở phần đuôi =\> Vi
+        phạm giả định phân phối chuẩn: Phân phối phần dư không hoàn toàn
+        chuẩn, đặc biệt ở các giá trị cực đại và cực tiểu (đuôi dữ
+        liệu).
+
+```{r}
+# Xác định giá trị ngoại lai bằng Cook's Distance
+cooks_dist <- cooks.distance(md_bmi_update)
+outliers <- which(cooks_dist > (4 / nrow(data_no_diabetes)))
+
+# Loại bỏ các dòng ngoại lai
+data_no_outliers <- data_no_diabetes[-outliers, ]
+
+# Chạy lại mô hình
+md_bmi_no_outliers <- lm(bmi ~ high_bp*high_chol + high_bp*phys_activity +
+                         high_bp*hvy_alcohol_consump + high_bp*gen_hlth + 
+                         high_bp*diff_walk + high_chol*smoker + smoker*fruits + 
+                         smoker*veggies + smoker*gen_hlth + smoker*diff_walk + 
+                         chol_check*age + stroke*gen_hlth + stroke*phys_hlth + 
+                         heart_diseaseor_attack + education + income + sex,
+                         data = data_no_outliers)
+
+# Kiểm tra lại phần dư
+qqnorm(residuals(md_bmi_no_outliers))
+qqline(residuals(md_bmi_no_outliers), col = "red")
+
+```
+
+Nhận xét:
+
+-   Các điểm trên biểu đồ hầu hết nằm gần đường chéo đỏ (đường kỳ vọng),
+    cho thấy rằng dữ liệu mẫu có xu hướng phù hợp với phân phối chuẩn.
+
+-   Phân phối dữ liệu khá phù hợp với phân phối chuẩn ở phần giữa, nhưng
+    có độ lệch nhẹ ở hai đầu
+
+## 6. Chạy lại mô hình hồi quy tuyến tính với data mới
+
+```{r}
+data_no_outliers <- data_no_diabetes[-outliers, ]
+head(data_no_outliers)
+# Chạy lại mô hình
+final_md <- lm(bmi ~ high_bp*high_chol + high_bp*phys_activity +
+                         high_bp*hvy_alcohol_consump + high_bp*gen_hlth + 
+                         high_bp*diff_walk + high_chol*smoker + smoker*fruits + 
+                         smoker*veggies + smoker*gen_hlth + smoker*diff_walk + 
+                         chol_check*age + stroke*gen_hlth + stroke*phys_hlth + 
+                         heart_diseaseor_attack + education + income + sex,
+                         data = data_no_outliers)
+summary(final_md)
+```
+
+R\^2 tăng lên đáng kể so với mô hình ban đầu, các thông số khác được
+nâng cao
+
+=\> Mô hình được cải thiện hiệu suất
+
+# C. Nhận xét và đưa ra khuyến nghị với BMI
+
+## 1. Về mô hình
+
+### Nhận xét:
+
+-   Mô hình cuối cùng để kiểm tra sự tuyến tính của các biến khác lên
+    BMI là
+
+    final_md \<- lm(bmi \~ high_bp \* high_chol + high_bp \*
+    phys_activity + high_bp \* hvy_alcohol_consump + high_bp \*
+    gen_hlth + high_bp \* diff_walk + high_chol \* smoker + smoker \*
+    fruits + smoker \* veggies + smoker \* *gen_hlth + smoker*
+    diff_walk + chol_check \* age + stroke \* gen_hlth + stroke \*
+    phys_hlth + heart_diseaseor_attack + education + income + sex, data
+    = data_no_outliers)
+
+-   High_bp (Huyết áp cao) tác động đến BMI thông qua các tương tác:
+
+    -   high_bp \* high_chol: Huyết áp cao và cholesterol cao có thể
+        cùng tăng nguy cơ ảnh hưởng đến BMI.
+    -   high_bp \* phys_activity: Hoạt động thể chất giảm hoặc không đủ
+        ở người huyết áp cao có thể làm tăng BMI.
+    -   high_bp \* hvy_alcohol_consump: Tiêu thụ rượu nặng và huyết áp
+        cao góp phần làm tăng BMI.
+    -   high_bp \* gen_hlth: Sự kết hợp giữa huyết áp cao và sức khỏe
+        tổng quát kém làm tăng BMI.
+    -   high_bp \* diff_walk: Khó khăn trong đi lại kết hợp với huyết áp
+        cao cũng là yếu tố đáng kể.
+
+-   High_chol (Cholesterol cao) kết hợp với hành vi hút thuốc (high_chol
+    \* smoker) ảnh hưởng đến BMI.
+
+-   Smoker (Hút thuốc lá) hút thuốc tác động đến BMI qua nhiều yếu tố
+    khác: smoker \* fruits: Việc hút thuốc và thiếu trái cây trong chế
+    độ ăn góp phần làm thay đổi BMI.
+
+    -   smoker \* veggies: Tương tự, sự thiếu rau củ cùng với hút thuốc
+        làm tăng BMI.
+    -   smoker \* gen_hlth: Sức khỏe tổng quát kém của người hút thuốc
+        ảnh hưởng lớn đến BMI.
+    -   smoker \* diff_walk: Khó khăn đi lại cũng có tác động tiêu cực
+        khi kết hợp với hút thuốc.
+
+-   Chol_check (Kiểm tra cholesterol) kết hợp với tuổi (chol_check \*
+    age), cho thấy tuổi tác cùng tầm soát cholesterol có ảnh hưởng đến
+    BMI.
+
+-   Stroke và Heart_diseaseor_attack (Đột quỵ và bệnh tim) những người
+    từng bị đột quỵ hoặc bệnh tim có thể có BMI khác biệt do ảnh hưởng
+    đến sức khỏe tổng quát và hoạt động thể chất.
+
+-   Education (Trình độ học vấn) trình độ học vấn có thể phản ánh thói
+    quen sống lành mạnh hơn (ăn uống, hoạt động thể chất) và từ đó ảnh
+    hưởng đến BMI.
+
+-   Income (Thu nhập) thu nhập cao có thể đi kèm với khả năng tiếp cận
+    thực phẩm chất lượng hoặc chế độ sống lành mạnh hơn, ảnh hưởng đến
+    BMI.
+
+-   Sex (Giới tính) ảnh hưởng đến BMI qua sự khác biệt về sinh học, hành
+    vi, và các yếu tố văn hóa.
+
+### Kết luận
+
+-   BMI chịu ảnh hưởng của nhiều yếu tố liên quan đến sức khỏe (như
+    huyết áp, cholesterol, đột quỵ), hành vi cá nhân (như hút thuốc,
+    tiêu thụ rượu, chế độ ăn), và các đặc điểm nhân khẩu học (giới tính,
+    thu nhập, trình độ học vấn).
+
+-   Tương tác giữa các biến: Mô hình chỉ ra rằng nhiều yếu tố không chỉ
+    ảnh hưởng trực tiếp đến BMI mà còn có sự tương tác phức tạp, ví dụ
+    như sự kết hợp giữa huyết áp cao, cholesterol, và các hành vi lối
+    sống.
+
+-   Tác động của sức khỏe tổng quát: Các biến như sức khỏe tổng quát
+    (gen_hlth), khó khăn đi lại (diff_walk) phản ánh rõ rệt tác động của
+    tình trạng sức khỏe chung lên BMI.
+
+## 2. Khuyến nghị để cải thiện BMI
+
+-   Kiểm soát huyết áp và cholesterol
+-   Giảm hoặc ngừng hút thuốc
+-   Hạn chế tiêu thụ rượu bia
+-   Tăng cường hoạt động thể chất
+-   Cải thiện chế độ ăn uống
+-   Sống lành mạnh
+
+## Classification
+Sử dụng các phương pháp phân loại để dự đoán tình trạng bệnh tiểu đường của bệnh nhân.
+### 1.Xử lý dữ liệu 
+#### 1.1 Lược bỏ các biến 
+Dựa vào kết quả của kiểm định Chi bình phương ở trên, ta thấy các biến "gen_hlth","income","education", "age" độc lập với biến diabetes_012.
+```{r}
+data <- data[, !names(data) %in% c("gen_hlth", "income", "education", "age")]
+data <- data |>
+  mutate(across(c(
+    diabetes_012, high_bp, high_chol, chol_check, smoker, stroke,
+    heart_diseaseor_attack, phys_activity, fruits, veggies,
+    hvy_alcohol_consump, any_healthcare, no_docbc_cost, diff_walk, sex
+  ), as.factor))
+```
+#### 1.2 Xử lý outlier 
+Xử lý outlier cho từng lớp trong diabetes_012
+```{r}
+numeric_vars <- c("bmi", "ment_hlth", "phys_hlth")  # Danh sách các biến định lượng
+
+data <- data %>%
+  group_by(diabetes_012) %>%
+  mutate(across(
+    all_of(numeric_vars),
+    ~ ifelse(. < quantile(., 0.25, na.rm = TRUE) - 1.5 * IQR(.),
+             quantile(., 0.25, na.rm = TRUE) - 1.5 * IQR(.),
+             ifelse(. > quantile(., 0.75, na.rm = TRUE) + 1.5 * IQR(.),
+                    quantile(., 0.75, na.rm = TRUE) + 1.5 * IQR(.), .))
+  )) %>%
+  ungroup()
+
+data
+```
+```{r}
+# Vẽ box plot cho từng cột
+columns_to_plot <- c("bmi", "phys_hlth", "ment_hlth")
+
+# Lặp qua các cột để vẽ box plot
+for (col in columns_to_plot) {
+  boxplot(data[[col]],
+          main = paste("Box Plot of", col),
+          ylab = col,
+          col = "lightblue",
+          border = "blue",
+          notch = TRUE)
+}
+
+```
+
+#### 1.3 Xử lý mất cân bằng dữ liệu
+```{r}
+ggplot(data, aes(x = diabetes_012 , fill = as.factor(diabetes_012))) +
+  geom_bar(position = "stack") +  # Hiển thị số lượng
+  labs(
+    title = "Stacked Bar Chart for diabetes_012",
+    x = "Groups",
+    y = "Count",
+    fill = "Diabetes Status"
+  ) +
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62", "#8da0cb")) +
+  theme_minimal()
+```
+
+
+Số lượng người ở nhóm 0 cao hơn rất nhiều so với số lượng người ở nhóm 1 và nhóm 2 nên chúng ta cần phải xử lý dữ liệu bị mất cân bằng này.
+#### 1.3.1 Phương pháp under-sampling
+```{r}
+under_sampling_3c <- function(data, name_class) {
+  # Đảm bảo cột phân loại là vector và sau đó chuyển thành factor
+  class_fact <- as.factor(data[[name_class]])
+  
+  # Tách dữ liệu thành các nhóm dựa trên nhãn lớp
+  data_split <- split(data, class_fact)
+  
+  # Số lượng mẫu trong từng lớp
+  n_class <- sapply(data_split, nrow)
+  n_minor <- min(n_class)  # Số lượng mẫu nhỏ nhất
+  
+  # Giảm mẫu cho từng lớp
+  sampled_data <- lapply(data_split, function(class_data) {
+    if (nrow(class_data) > n_minor) {
+      # Chọn ngẫu nhiên n_minor mẫu nếu số lượng vượt quá n_minor
+      sampled_rows <- sample(seq_len(nrow(class_data)), size = n_minor, replace = FALSE)
+      class_data <- class_data[sampled_rows, ]
+    }
+    return(class_data)
+  })
+  
+  # Kết hợp lại các lớp
+  new_data <- do.call(rbind, sampled_data)
+  rownames(new_data) <- NULL  # Reset chỉ số dòng
+  return(new_data)
+}
+
+data_under <- under_sampling_3c(data, "diabetes_012")
+```
+
+
+```{r}
+table(data_under$diabetes_012)
+
+ggplot(data_under, aes(x = diabetes_012 , fill = as.factor(diabetes_012))) +
+  geom_bar(position = "stack") +  # Hiển thị số lượng
+  labs(
+    title = "Stacked Bar Chart for diabetes_012",
+    x = "Groups",
+    y = "Count",
+    fill = "Diabetes Status"
+  ) +
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62", "#8da0cb")) +
+  theme_minimal()
+```
+
+
+
+#### 1.3.2 Phương pháp over-sampling
+
+```{r}
+over_sampling_multi <- function(data, name_class) {
+# Chuyển cột class thành factor
+class_fact <- as.factor(data[[name_class]])
+
+# Chia dữ liệu theo từng nhóm
+data_split <- split(data, class_fact)
+
+# Đếm số lượng mẫu của từng nhóm
+n_class <- sapply(data_split, FUN = nrow)
+
+# Xác định số lượng mẫu lớn nhất
+n_max <- max(n_class)
+
+# Tăng cường mẫu cho từng nhóm
+new_data <- do.call(rbind, lapply(names(data_split), function(class_name) {
+group_data <- data_split[[class_name]]
+n_samples <- nrow(group_data)
+
+# Nếu nhóm có ít hơn n_max, thực hiện over-sampling
+if (n_samples < n_max) {
+id_samples <- sample(1:n_samples, size = n_max, replace = TRUE)
+group_data <- group_data[id_samples, ]
+}
+
+return(group_data)
+}))
+
+return(new_data)
+}
+
+``` 
+
+```{r}
+# Áp dụng phương pháp over-sampling
+data_over <- over_sampling_multi(data, "diabetes_012")
+```
+
+```{r}
+# Kiểm tra sự mất cân bằng dữ liệu (imbalanced data) cho biến mục tiêu "diabetes_012"
+imbalanced_summary <- table(data_over$diabetes_012)
+print(imbalanced_summary)
+ggplot(data_over, aes(x = diabetes_012 , fill = as.factor(diabetes_012))) +
+  geom_bar(position = "stack") +  # Hiển thị số lượng
+  labs(
+    title = "Stacked Bar Chart for diabetes_012",
+    x = "Groups",
+    y = "Count",
+    fill = "Diabetes Status"
+  ) +
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62", "#8da0cb")) +
+  theme_minimal()
+```
+#### 1.3.3 Phương pháp SMOTE
+
+```{r}
+table(data$diabetes_012)
+```
+```{r}
+glimpse(data)
+```
+
+
+```{r}
+data_smote = smotenc(df = data, var = "diabetes_012",
+k = 5, over_ratio = 1)
+data
+```
+
+```{r}
+table(data_smote$diabetes_012)
+```
+```{r}
+ggplot(data_smote, aes(x = diabetes_012 , fill = as.factor(diabetes_012))) +
+  geom_bar(position = "stack") +  # Hiển thị số lượng
+  labs(
+    title = "Stacked Bar Chart for diabetes_012",
+    x = "Groups",
+    y = "Count",
+    fill = "Diabetes Status"
+  ) +
+  scale_fill_manual(values = c("#66c2a5", "#fc8d62", "#8da0cb")) +
+  theme_minimal()
+```
+
+#### 1.4 Chia và chuẩn hóa dữ liệu
+
+```{r}
+# Hàm chia dữ liệu thành train và test
+split_random <- function(data, target_col, train_ratio = 0.7) {
+  set.seed(86)  # Đặt seed để đảm bảo tính tái lập
+  train_index <- createDataPartition(data[[target_col]], p = train_ratio, list = FALSE)
+  train_data <- data[train_index, ]
+  test_data <- data[-train_index, ]
+  list(train = train_data, test = test_data)
+}
+
+# Hàm chuẩn hóa dữ liệu (Min-Max Scaling)
+normalize_data <- function(train_data, test_data, cols) {
+  for (col in cols) {
+    min_val <- min(train_data[[col]], na.rm = TRUE)
+    max_val <- max(train_data[[col]], na.rm = TRUE)
+    
+    # Chuẩn hóa tập huấn luyện
+    train_data[[col]] <- (train_data[[col]] - min_val) / (max_val - min_val)
+    
+    # Chuẩn hóa tập kiểm tra
+    test_data[[col]] <- (test_data[[col]] - min_val) / (max_val - min_val)
+  }
+  list(train = train_data, test = test_data)
+}
+
+# Các cột định lượng cần chuẩn hóa
+continuous_cols <- c("bmi", "ment_hlth", "phys_hlth")
+
+# Áp dụng cho từng tập dữ liệu (data_under, data_over, data_smote)
+datasets <- list(under = data_under, over = data_over, smote = data_smote)
+
+# Kết quả sau khi chia và chuẩn hóa
+processed_data <- lapply(datasets, function(dataset) {
+  # Chia dữ liệu thành train và test
+  split <- split_random(dataset, target_col = "diabetes_012", train_ratio = 0.7)
+  # Chuẩn hóa dữ liệu
+  normalize_data(split$train, split$test, continuous_cols)
+})
+
+
+# Truy cập kết quả cho từng tập dữ liệu
+train_data_under <- processed_data$under$train
+test_data_under <- processed_data$under$test
+
+train_data_over <- processed_data$over$train
+test_data_over <- processed_data$over$test
+
+train_data_smote <- processed_data$smote$train
+test_data_smote <- processed_data$smote$test
+
+# Kiểm tra phân phối và chuẩn hóa
+cat("Under-sampling - Train distribution:\n")
+print(table(train_data_under$diabetes_012))
+
+cat("Under-sampling - Test distribution:\n")
+print(table(test_data_under$diabetes_012))
+
+cat("\nOver-sampling - Train distribution:\n")
+print(table(train_data_over$diabetes_012))
+
+cat("Over-sampling - Test distribution:\n")
+print(table(test_data_over$diabetes_012))
+
+cat("\nSMOTE - Train distribution:\n")
+print(table(train_data_smote$diabetes_012))
+
+cat("SMOTE - Test distribution:\n")
+print(table(test_data_smote$diabetes_012))
+
+```
+
+
+# 2.Xây dựng mô hình phân loại
+## 2.1 Phương pháp Naive Bayes
+
+Xây dựng mô hình lần lượt với 3 bộ dữ liệu:
+  Với bộ dữ liệu xử lý bằng phương pháp under-sampling:
+```{r}
+# Xây dựng mô hình với lần lượt 3 bộ dữ liệu sau khi xử lý:
+# Với dữ liệu xử lý bằng under-sampling 
+nb_model <- naiveBayes(diabetes_012 ~ ., data = train_data_under)
+
+newdata = test_data_under[, !(colnames(test_data_under) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(nb_model, newdata)
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_under$diabetes_012)
+print(conf_matrix)
+```
+```{r}
+# Với dữ liệu xử lý bằng over-sampling 
+nb_model <- naiveBayes(diabetes_012 ~ ., data = train_data_over)
+
+newdata = test_data_over[, !(colnames(test_data_over) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(nb_model, newdata)
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_over$diabetes_012)
+
+print(conf_matrix)
+```
+
+
+```{r}
+# Với dữ liệu xử lý bằng smote-sampling 
+nb_model <- naiveBayes(diabetes_012 ~ ., data = train_data_smote)
+
+newdata = test_data_smote[, !(colnames(test_data_smote) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(nb_model, newdata)
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_smote$diabetes_012)
+print(conf_matrix)
+```
+Vẽ ROC và  tính  AUC để đánh giá 3 mô hình trên.
+```{r}
+# Hàm tính và vẽ đường ROC
+plot_roc <- function(model, test_data, target_col) {
+  # Loại cột mục tiêu khỏi dữ liệu kiểm tra
+  newdata <- test_data[, !(colnames(test_data) == target_col)]
+  
+  # Tính toán xác suất dự đoán
+  prob_predictions <- predict(model, newdata, type = "raw")
+  
+  # Chuyển cột mục tiêu thành dạng numeric
+  actual_classes <- as.numeric(test_data[[target_col]]) - 1
+  
+  # Vẽ đường ROC cho từng lớp
+  roc_list <- lapply(1:ncol(prob_predictions), function(class_index) {
+    roc(response = actual_classes == (class_index - 1), 
+        predictor = prob_predictions[, class_index], 
+        levels = c(FALSE, TRUE), 
+        direction = "<")
+  })
+  
+  # Vẽ các đường ROC trên cùng một biểu đồ
+  plot(roc_list[[1]], col = "red", main = "ROC Curve for Classes", legacy.axes = TRUE)
+  for (i in 2:length(roc_list)) {
+    plot(roc_list[[i]], col = i + 1, add = TRUE)
+  }
+  
+  # Thêm chú thích
+  legend("bottomright", legend = paste("Class", 0:(length(roc_list) - 1)), 
+         col = 2:(length(roc_list) + 1), lwd = 2)
+  
+  # Tính và in AUC cho từng lớp
+  auc_values <- sapply(roc_list, function(roc) auc(roc))
+  print(paste("AUC for each class:", auc_values))
+}
+
+# Vẽ đường ROC cho dữ liệu under-sampling
+cat("Under-sampling:\n")
+plot_roc(nb_model, test_data_under, "diabetes_012")
+
+# Vẽ đường ROC cho dữ liệu over-sampling
+cat("\nOver-sampling:\n")
+plot_roc(nb_model, test_data_over, "diabetes_012")
+
+# Vẽ đường ROC cho dữ liệu SMOTE
+cat("\nSMOTE:\n")
+plot_roc(nb_model, test_data_smote, "diabetes_012")
+
+```
+
+Nhận thấy kết quả của việc phân loại bằng phương pháp Naive Bayes không được khả quan, chúng ta kiểm tra lại các giả định ban đầu của phương pháp đã được thỏa hay chưa:
++ Giả định phân phối của biến là phân phối chuẩn:
+```{r}
+ggplot(data, aes(x = bmi)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "skyblue", color = "black") +
+  stat_function(fun = dnorm, 
+                args = list(mean = mean(data$bmi, na.rm = TRUE), 
+                            sd = sd(data$bmi, na.rm = TRUE)),
+                color = "red", linewidth = 1) + 
+  labs(title = "Histogram của biến BMI", x = "BMI", y = "Mật độ") +
+  theme_minimal()
+
+```
+
+
+Do histogram không đối xứng và có đuôi dài về phía phải, dữ liệu không phải là phân phối chuẩn. Dữ liệu không tuân theo phân phối chuẩn.
+```{r}
+qqnorm(data$bmi, main = "Q-Q Plot của biến BMI")
+qqline(data$bmi, col = "red", lwd = 2)
+
+```
+
+
+Dữ liệu dữ liệu có sự lệch đáng kể so với đường màu đỏ, dữ liệu BMI không có phân phối chuẩn. Không thỏa giả định của phương pháp Naive Bayes.
+
+
+### 2.2 Phương pháp Discriminant Analysis
+#### 2.2.1 Linear Discriminant Analysis
+```{r}
+# Hàm đánh giá
+eval_multi_class <- function(conf_matrix) {
+  cc <- sum(diag(conf_matrix))
+  sc <- sum(conf_matrix)
+  pp <- colSums(conf_matrix)
+  tt <- rowSums(conf_matrix)
+  
+  prec <- diag(conf_matrix) / colSums(conf_matrix)
+  recall <- diag(conf_matrix) / rowSums(conf_matrix)
+  macro_prec <- mean(prec, na.rm = TRUE)
+  macro_recall <- mean(recall, na.rm = TRUE)
+  macro_f1 <- 2 * macro_prec * macro_recall / (macro_prec + macro_recall)
+  acc <- cc / sc
+  kap <- (cc * sc - sum(pp * tt)) / (sc^2 - sum(pp * tt))
+  
+  list(
+    Precision = prec,
+    Recall = recall,
+    Accuracy = acc,
+    Kappa = kap,
+    Macro_F1 = macro_f1
+  )
+}
+```
+
+```{r}
+
+# Hàm tính và vẽ đường ROC
+plot_roc <- function(prob_predictions, actual_classes) {
+  # Vẽ đường ROC cho từng lớp
+  roc_list <- lapply(1:ncol(prob_predictions), function(class_index) {
+    roc(response = actual_classes == (class_index - 1), 
+        predictor = prob_predictions[, class_index], 
+        levels = c(FALSE, TRUE), 
+        direction = "<")
+  })
+  
+  # Vẽ các đường ROC trên cùng một biểu đồ
+  plot(roc_list[[1]], col = "red", main = "ROC Curve for Classes", legacy.axes = TRUE)
+  for (i in 2:length(roc_list)) {
+    plot(roc_list[[i]], col = i + 1, add = TRUE)
+  }
+  
+  # Thêm chú thích
+  legend("bottomright", legend = paste("Class", 0:(length(roc_list) - 1)), 
+         col = 2:(length(roc_list) + 1), lwd = 2)
+  
+  # Tính và in AUC cho từng lớp
+  auc_values <- sapply(roc_list, function(roc) auc(roc))
+  print(paste("AUC for each class:", auc_values))
+}
+```
+
+Thực hiện với bộ dữ liệu được xử lý bằng phương pháp under-sampling:
+```{r}
+# train_data_under
+# LDA
+lda_model <- lda(diabetes_012 ~ ., data = train_data_under)
+
+lda_predictions <- predict(lda_model, newdata = test_data_under)
+lda_class <- lda_predictions$class
+lda_posterior <- lda_predictions$posterior
+
+# Confusion Matrix
+conf_matrix_lda <- table(test_data_under$diabetes_012, lda_class)
+conf_matrix_lda
+eval_multi_class(conf_matrix_lda)
+
+# Chuyển đổi cột mục tiêu thành dạng numeric
+actual_classes <- as.numeric(test_data_under$diabetes_012) - 1
+
+# Vẽ đường ROC và tính AUC cho mô hình LDA
+cat("Under-sampling - LDA:\n")
+plot_roc(lda_posterior, actual_classes)
+```
+
+Thực hiện trên bộ dữ liệu xử lý bằng phương pháp over-sampling:
+```{r}
+# train_data_over 
+# LDA
+lda_model <- lda(diabetes_012 ~ ., data = train_data_over)
+
+newdata = test_data_over[, !(colnames(test_data_over) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(lda_model, newdata)$class
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_over$diabetes_012)
+print(conf_matrix)
+
+# Dự đoán xác suất và lớp
+lda_predictions <- predict(lda_model, newdata)
+lda_posterior <- lda_predictions$posterior
+
+# Chuyển đổi cột mục tiêu thành dạng numeric
+actual_classes <- as.numeric(test_data_over$diabetes_012) - 1
+
+# Vẽ đường ROC và tính AUC
+cat("Over-sampling - LDA:\n")
+plot_roc(lda_posterior, actual_classes)
+```
+
+Thực hiện với bộ dữ liệu được xử lý bằng phương pháp SMOTE:
+```{r}
+# train_data_smote 
+# LDA
+lda_model <- lda(diabetes_012 ~ ., data = train_data_smote)
+
+newdata = test_data_smote[, !(colnames(test_data_over) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(lda_model, newdata)$class
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_smote$diabetes_012)
+print(conf_matrix)
+
+# Dự đoán xác suất và lớp
+lda_predictions <- predict(lda_model, newdata)
+lda_posterior <- lda_predictions$posterior
+
+# Chuyển đổi cột mục tiêu thành dạng numeric
+actual_classes <- as.numeric(test_data_smote$diabetes_012) - 1
+
+# Vẽ đường ROC và tính AUC
+cat("Over-sampling - LDA:\n")
+plot_roc(lda_posterior, actual_classes)
+```
+#### 2.2.2 Quadratic Discriminant Analysis
+Thực hiện với dữ liệu xử lý bằng under-sampling:
+```{r}
+# QDA
+# train_data_under
+qda_model <- qda(diabetes_012 ~ ., data = train_data_under)
+
+qda_predictions <- predict(qda_model, newdata = test_data_under)
+qda_class <- qda_predictions$class
+qda_posterior <- qda_predictions$posterior
+
+# Confusion Matrix
+conf_matrix_qda <- table(test_data_under$diabetes_012, qda_class)
+conf_matrix_qda
+eval_multi_class(conf_matrix_qda)
+
+# Chuyển đổi cột mục tiêu thành dạng numeric
+actual_classes <- as.numeric(test_data_under$diabetes_012) - 1
+
+# Vẽ đường ROC và tính AUC cho mô hình LDA
+cat("Under-sampling - LDA:\n")
+plot_roc(qda_posterior, actual_classes)
+
+```
+
+Thực hiện với dữ liệu xử lý bằng over-sampling:
+```{r}
+# Với dữ liệu xử lý bằng over-sampling
+qda_model <- qda(diabetes_012 ~ ., data = train_data_over)
+
+newdata = test_data_over[, !(colnames(test_data_over) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(qda_model, newdata)$class
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_over$diabetes_012)
+print(conf_matrix)
+
+# Dự đoán xác suất và lớp
+qda_predictions <- predict(lda_model, newdata)
+qda_posterior <- qda_predictions$posterior
+
+# Chuyển đổi cột mục tiêu thành dạng numeric
+actual_classes <- as.numeric(test_data_over$diabetes_012) - 1
+
+# Vẽ đường ROC và tính AUC
+cat("Over-sampling - LDA:\n")
+plot_roc(qda_posterior, actual_classes)
+```
+
+Thực hiện với dữ liệu xử lý bằng smote-sampling:
+```{r}
+# Với dữ liệu xử lý bằng smote-sampling
+qda_model <- qda(diabetes_012 ~ ., data = train_data_smote)
+
+newdata = test_data_smote[, !(colnames(test_data_smote) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(qda_model, newdata)$class
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_smote$diabetes_012)
+print(conf_matrix)
+
+# Dự đoán xác suất và lớp
+qda_predictions <- predict(lda_model, newdata)
+qda_posterior <- qda_predictions$posterior
+
+# Chuyển đổi cột mục tiêu thành dạng numeric
+actual_classes <- as.numeric(test_data_over$diabetes_012) - 1
+
+# Vẽ đường ROC và tính AUC
+cat("Over-sampling - LDA:\n")
+plot_roc(qda_posterior, actual_classes)
+```
+
+### 2.3 Phương pháp Hồi quy Logistic
+Thực hiện với bộ dữ liệu được xử lý bằng phương pháp under-sampling:
+    Train mô hình:
+```{r}
+X <- train_data_under[, setdiff(colnames(data), "diabetes_012")] # Loại bỏ cột Y
+Y <- train_data_under$diabetes_012
+
+model_under_train <- multinom(diabetes_012 ~ ., data = train_data_under, maxit = 1500)
+summary(model_under_train)
+```
+
+```{r}
+pred_class_under_train <- predict(model_under_train, type = "class")
+conf_matrix_under_train <- table(Y, pred_class_under_train)
+conf_matrix_under_train
+```
+```{r}
+conf_matrix_under_train <- as.matrix(conf_matrix_under_train)
+conf_matrix_under_train
+```
+
+
+```{r}
+acc_class_under_train <- sum(diag(conf_matrix_under_train))/sum(conf_matrix_under_train)
+acc_class_under_train
+
+```
+```{r}
+prec_class_under_train <- diag(conf_matrix_under_train)/colSums(conf_matrix_under_train)
+prec_class_under_train
+
+```
+
+```{r}
+recall_class_under_train <- diag(conf_matrix_under_train)/rowSums(conf_matrix_under_train)
+recall_class_under_train
+```
+
+```{r}
+macro_prec_under_train <- mean(prec_class_under_train)
+macro_recall_under_train <- mean(recall_class_under_train)
+macro_f1_under_train <- 2 * macro_prec_under_train * macro_recall_under_train/(1/macro_prec_under_train + 1/macro_recall_under_train)
+macro_f1_under_train
+```
+
+```{r}
+eval_multi_class <- function(x) {
+  if (!is.matrix(x) && !inherits(x, "table")) {
+    stop("lỗi")
+  }
+  
+
+  if (inherits(x, "table")) {
+    x <- as.matrix(x)
+  }
+
+  # Tính toán các thông số
+  cc <- sum(diag(x))  # Tổng số dự đoán đúng
+  sc <- sum(x)        # Tổng số phần tử
+  pp <- colSums(x)    # Tổng số phần tử trong từng cột
+  tt <- rowSums(x)    # Tổng số phần tử trong từng hàng
+
+  # Precision và Recall
+  prec <- diag(x) / colSums(x)
+  recall <- diag(x) / rowSums(x)
+  macro_prec <- mean(prec, na.rm = TRUE)
+  macro_recall <- mean(recall, na.rm = TRUE)
+
+  # F1-score
+  macro_f1 <- 2 * macro_prec * macro_recall / (macro_prec + macro_recall)
+
+  # Accuracy
+  acc <- cc / sc
+
+  # Kappa statistic
+  kap <- (cc * sc - sum(pp * tt)) / (sc^2 - sum(pp * tt))
+
+  # Trả về kết quả
+  return(list(
+    Precision = prec,
+    Recall = recall,
+    Accuracy = acc,
+    Kappa = kap,
+    Macro_F1 = macro_f1
+  ))
+}
+
+
+# Tính toán các chỉ số cho tập huấn luyện
+result_under_train <- eval_multi_class(conf_matrix_under_train)
+print(result_under_train)
+
+```
+    
+    Kiểm tra trên tập test:
+
+```{r}
+out_prob_mlogit_under_test <- predict(model_under_train, newdata = test_data_under,
+type = "probs")
+# In ra 5 giá trị đầu tiên
+head(out_prob_mlogit_under_test, 5)
+
+
+```
+
+```{r}
+out_class_mlogit_under_test <- predict(model_under_train, newdata = test_data_under,
+type = "class")
+head(out_class_mlogit_under_test,5)
+```
+```{r}
+conf_matrix_under_test <- table(test_data_under$diabetes_012, out_class_mlogit_under_test)
+
+#  Hiển thị confusion matrix
+conf_matrix_under_test
+```
+```{r}
+acc_class_under_test <- sum(diag(conf_matrix_under_test))/sum(conf_matrix_under_test)
+acc_class_under_test
+
+```
+
+```{r}
+eval_multi_class <- function(x) {
+  if (!is.matrix(x) && !inherits(x, "table")) {
+    stop("Input phải là ma trận hoặc bảng tần suất!")
+  }
+  
+  if (inherits(x, "table")) {
+    x <- as.matrix(x)
+  }
+
+  # Chuẩn hóa ma trận nếu cần
+  sc <- sum(x)  # Tổng số phần tử
+  if (sc > 1e7) {  # Nếu tổng quá lớn, chuẩn hóa ma trận
+    x <- x / sc
+    message("Ma trận được chuẩn hóa để tránh overflow.")
+  }
+  
+  # Tính toán các thông số
+  cc <- sum(diag(x))  # Tổng số dự đoán đúng
+  pp <- colSums(x)    # Tổng số phần tử trong từng cột
+  tt <- rowSums(x)    # Tổng số phần tử trong từng hàng
+
+  # Precision và Recall
+  prec <- diag(x) / colSums(x)
+  recall <- diag(x) / rowSums(x)
+  macro_prec <- mean(prec, na.rm = TRUE)
+  macro_recall <- mean(recall, na.rm = TRUE)
+
+  # F1-score
+  macro_f1 <- 2 * macro_prec * macro_recall / (macro_prec + macro_recall)
+
+  # Accuracy
+  acc <- cc / sc
+
+  # Tính Kappa
+  expected_accuracy <- sum(tt * pp) / sc^2
+  kappa <- (acc - expected_accuracy) / (1 - expected_accuracy)
+
+  # Trả về kết quả
+  return(list(
+    Precision = prec,
+    Recall = recall,
+    Accuracy = acc,
+    Macro_F1 = macro_f1,
+    Kappa = kappa
+  ))
+}
+
+eval_multi_class(conf_matrix_under_test)
+
+```
+
+
+Thực hiện với bộ dữ liệu được xử lý bằng phương pháp over-sampling:
+    Train mô hình:
+```{r}
+X <- train_data_over[, setdiff(colnames(data), "diabetes_012")] # Loại bỏ cột Y
+Y <- train_data_over$diabetes_012
+
+model_over_train <- multinom(diabetes_012 ~ ., data = train_data_over, maxit = 1500)
+summary(model_over_train)
+```
+```{r}
+pred_class_over_train <- predict(model_over_train, type = "class")
+conf_matrix_over_train <- table(Y, pred_class_over_train)
+conf_matrix_over_train
+```
+
+```{r}
+conf_matrix_over_train <- as.matrix(conf_matrix_over_train)
+head(conf_matrix_over_train,5)
+```
+
+
+```{r}
+acc_class_over_train <- sum(diag(conf_matrix_over_train))/sum(conf_matrix_over_train)
+head(acc_class_over_train,5)
+
+```
+```{r}
+eval_multi_class(conf_matrix_over_train)
+```
+
+    Kiểm tra trên tập test:
+```{r}
+
+out_class_mlogit_over_test <- predict(model_over_train, newdata = test_data_over,
+type = "class")
+head(out_class_mlogit_over_test,5)
+```
+
+```{r}
+conf_matrix_over_test <- table(test_data_over$diabetes_012, out_class_mlogit_over_test)
+
+# Hiển thị confusion matrix
+conf_matrix_over_test
+```
+```{r}
+acc_class_over_test <- sum(diag(conf_matrix_over_test))/sum(conf_matrix_over_test)
+acc_class_over_test
+
+```
+```{r}
+eval_multi_class(conf_matrix_over_test)
+```
+
+Thực hiện với bộ dữ liệu được xử lý bằng phương pháp SMOTE:
+    Train mô hình:
+```{r}
+X <- train_data_smote[, setdiff(colnames(data), "diabetes_012")] # Loại bỏ cột Y
+Y <- train_data_smote$diabetes_012
+
+model_smote_train <- multinom(diabetes_012 ~ ., data = train_data_smote, maxit = 1500)
+summary(model_smote_train)
+```
+
+
+```{r}
+pred_class_smote_train <- predict(model_smote_train, type = "class")
+conf_matrix_smote_train <- table(Y, pred_class_smote_train)
+conf_matrix_smote_train
+```
+
+```{r}
+acc_class_smote_train <- sum(diag(conf_matrix_smote_train))/sum(conf_matrix_smote_train)
+acc_class_smote_train
+```
+
+```{r}
+eval_multi_class(conf_matrix_smote_train)
+```
+
+    Kiểm tra trên tập test:
+```{r}
+out_class_mlogit_smote_test <- predict(model_smote_train, newdata = test_data_smote,
+type = "class")
+head(out_class_mlogit_smote_test,5)
+```
+
+```{r}
+conf_matrix_smote_test <- table(test_data_smote$diabetes_012, out_class_mlogit_smote_test)
+
+# 3. Hiển thị ma trận nhầm lẫn
+conf_matrix_smote_test
+```
+
+
+```{r}
+acc_class_smote_test <- sum(diag(conf_matrix_smote_test))/sum(conf_matrix_smote_test)
+acc_class_smote_test
+```
+
+```{r}
+eval_multi_class(conf_matrix_smote_test)
+```
+### 2.4 Hồi quy Lasso để lựa chọn biến có ý nghĩa
+```{r}
+# Chuẩn bị dữ liệu
+X <- model.matrix(diabetes_012 ~ ., data = data)[, -1] # Loại bỏ cột intercept
+y <- data$diabetes_012
+
+# Lasso regression với lambda tối ưu
+lasso_model <- cv.glmnet(X, y, family = "multinomial", alpha = 1)
+print(lasso_model)
+
+# Lấy các biến được chọn
+coef(lasso_model, s = "lambda.min")
+
+```
+```{r}
+data <- data[, !names(data) %in% c("fruits","any_healthcare")]
+# Load các thư viện cần thiết
+data
+```
+```{r}
+under_sampling_3c <- function(data, name_class) {
+  # Đảm bảo cột phân loại là vector và sau đó chuyển thành factor
+  class_fact <- as.factor(data[[name_class]])
+  
+  # Tách dữ liệu thành các nhóm dựa trên nhãn lớp
+  data_split <- split(data, class_fact)
+  
+  # Số lượng mẫu trong từng lớp
+  n_class <- sapply(data_split, nrow)
+  n_minor <- min(n_class)  # Số lượng mẫu nhỏ nhất
+  
+  # Giảm mẫu cho từng lớp
+  sampled_data <- lapply(data_split, function(class_data) {
+    if (nrow(class_data) > n_minor) {
+      # Chọn ngẫu nhiên n_minor mẫu nếu số lượng vượt quá n_minor
+      sampled_rows <- sample(seq_len(nrow(class_data)), size = n_minor, replace = FALSE)
+      class_data <- class_data[sampled_rows, ]
+    }
+    return(class_data)
+  })
+  
+  # Kết hợp lại các lớp
+  new_data <- do.call(rbind, sampled_data)
+  rownames(new_data) <- NULL  # Reset chỉ số dòng
+  return(new_data)
+}
+
+data_under <- under_sampling_3c(data, "diabetes_012")
+
+over_sampling_multi <- function(data, name_class) {
+# Chuyển cột class thành factor
+class_fact <- as.factor(data[[name_class]])
+
+# Chia dữ liệu theo từng nhóm
+data_split <- split(data, class_fact)
+
+# Đếm số lượng mẫu của từng nhóm
+n_class <- sapply(data_split, FUN = nrow)
+
+# Xác định số lượng mẫu lớn nhất
+n_max <- max(n_class)
+
+# Tăng cường mẫu cho từng nhóm
+new_data <- do.call(rbind, lapply(names(data_split), function(class_name) {
+group_data <- data_split[[class_name]]
+n_samples <- nrow(group_data)
+
+# Nếu nhóm có ít hơn n_max, thực hiện over-sampling
+if (n_samples < n_max) {
+id_samples <- sample(1:n_samples, size = n_max, replace = TRUE)
+group_data <- group_data[id_samples, ]
+}
+
+return(group_data)
+}))
+
+return(new_data)
+}
+
+``` 
+
+```{r}
+# Áp dụng phương pháp over-sampling
+data_over <- over_sampling_multi(data, "diabetes_012")
+```
+
+```{r}
+data_smote = smotenc(df = data, var = "diabetes_012",
+k = 5, over_ratio = 1)
+
+```
+
+```{r}
+# Hàm chia dữ liệu thành train và test
+split_random <- function(data, target_col, train_ratio = 0.7) {
+  set.seed(86)  # Đặt seed để đảm bảo tính tái lập
+  train_index <- createDataPartition(data[[target_col]], p = train_ratio, list = FALSE)
+  train_data <- data[train_index, ]
+  test_data <- data[-train_index, ]
+  list(train = train_data, test = test_data)
+}
+
+# Hàm chuẩn hóa dữ liệu (Min-Max Scaling)
+normalize_data <- function(train_data, test_data, cols) {
+  for (col in cols) {
+    min_val <- min(train_data[[col]], na.rm = TRUE)
+    max_val <- max(train_data[[col]], na.rm = TRUE)
+    
+    # Chuẩn hóa tập huấn luyện
+    train_data[[col]] <- (train_data[[col]] - min_val) / (max_val - min_val)
+    
+    # Chuẩn hóa tập kiểm tra
+    test_data[[col]] <- (test_data[[col]] - min_val) / (max_val - min_val)
+  }
+  list(train = train_data, test = test_data)
+}
+
+# Các cột định lượng cần chuẩn hóa
+continuous_cols <- c("bmi", "ment_hlth", "phys_hlth")
+
+# Áp dụng cho từng tập dữ liệu (data_under, data_over, data_smote)
+datasets <- list(under = data_under, over = data_over, smote = data_smote)
+
+# Kết quả sau khi chia và chuẩn hóa
+processed_data <- lapply(datasets, function(dataset) {
+  # Chia dữ liệu thành train và test
+  split <- split_random(dataset, target_col = "diabetes_012", train_ratio = 0.7)
+  # Chuẩn hóa dữ liệu
+  normalize_data(split$train, split$test, continuous_cols)
+})
+
+# Truy cập kết quả cho từng tập dữ liệu
+train_data_under <- processed_data$under$train
+test_data_under <- processed_data$under$test
+
+train_data_over <- processed_data$over$train
+test_data_over <- processed_data$over$test
+
+train_data_smote <- processed_data$smote$train
+test_data_smote <- processed_data$smote$test
+```
+
+```{r}
+X <- train_data_smote[, setdiff(colnames(data), "diabetes_012")] # Loại bỏ cột Y
+Y <- train_data_smote$diabetes_012
+
+model_smote_train <- multinom(diabetes_012 ~ ., data = train_data_smote, maxit = 1500)
+summary(model_smote_train)
+
+pred_class_smote_train <- predict(model_smote_train, type = "class")
+conf_matrix_smote_train <- table(Y, pred_class_smote_train)
+conf_matrix_smote_train
+
+acc_class_smote_train <- sum(diag(conf_matrix_smote_train))/sum(conf_matrix_smote_train)
+acc_class_smote_train
+```
+
+
+```{r}
+eval_multi_class(conf_matrix_smote_train)
+```
+
+    Kiểm tra trên tập test:
+```{r}
+out_class_mlogit_smote_test <- predict(model_smote_train, newdata = test_data_smote,
+type = "class")
+head(out_class_mlogit_smote_test,5)
+
+conf_matrix_smote_test <- table(test_data_smote$diabetes_012, out_class_mlogit_smote_test)
+
+# 3. Hiển thị ma trận nhầm lẫn
+conf_matrix_smote_test
+
+acc_class_smote_test <- sum(diag(conf_matrix_smote_test))/sum(conf_matrix_smote_test)
+acc_class_smote_test
+
+eval_multi_class(conf_matrix_smote_test)
+```
+
+```{r}
+train_data_smote
+```
+
+```{r}
+# Với dữ liệu xử lý bằng smote-sampling 
+nb_model <- naiveBayes(diabetes_012 ~ ., data = train_data_smote)
+
+newdata = test_data_smote[, !(colnames(test_data_smote) == "diabetes_012")]
+# Dự đoán trên tập kiểm tra
+predictions <- predict(nb_model, newdata)
+# Đánh giá mô hình
+conf_matrix <- confusionMatrix(predictions, test_data_smote$diabetes_012)
+print(conf_matrix)
+```
+
+Nhận thấy kết quả của mô hình sau khi bỏ thêm 2 biến không khả quan hơn mô hình ban đầu đã dùng.
+Kết luận: Mô hình phân loại có hiệu suất tốt nhất là mô hình hồi quy Logistic với bộ dữ liệu được xử lý bằng phương pháp SMOTE.
