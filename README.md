@@ -1,4 +1,14 @@
 # Diabetes Risk Prediction Project
+## Members
+| **Name**| **Major**| **University**|
+|-|-|-|
+| Huynh Ha Anh Thu      | Data Science  | University of Science (VNUHCM) |
+| Tran Gia Huy          | Data Science  | University of Science (VNUHCM) |
+| Mai Thi Kim Ngan      | Data Science  | University of Science (VNUHCM) |
+| Luong Thanh Nam       | Data Science  | University of Science (VNUHCM) |
+| Le Thanh Thuy         | Data Science  | University of Science (VNUHCM) |
+
+
 
 ## Introduction
 Diabetes is a serious chronic disease that affects the body's ability to regulate blood glucose levels, leading to complications such as heart disease, vision loss, amputations, and kidney disease. Early diagnosis and timely intervention can significantly reduce the impact of this disease. The goal of this project is to build a prediction model for diabetes risk based on the 2015 health survey dataset of 253,680 U.S. citizens.
